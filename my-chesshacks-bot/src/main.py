@@ -7,7 +7,6 @@ import time
 
 from utils.evaluation import CNNEvaluator
 
-
 # ============================================================
 # GLOBALS / CONFIG
 # ============================================================
