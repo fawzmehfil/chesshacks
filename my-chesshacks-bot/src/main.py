@@ -32,6 +32,7 @@ PIECE_VALUES = {
     chess.KING:   0,   # king material value irrelevant in eval
 }
 
+
 model_path = os.path.join(os.path.dirname(__file__), "utils", "chess_cnn_final.pth")
 cnn_eval = CNNEvaluator(model_path)
 # model_path = "src/utils/chess_cnn_final.pth"
