@@ -1,11 +1,12 @@
-from utils import chess_manager, GameContext
+from .utils import chess_manager, GameContext
 from chess import Move
 import chess
 import chess.polyglot as polyglot
 import random
 import time
-
-from utils.evaluation import CNNEvaluator
+import os
+from .utils.evaluation import CNNEvaluator
+import torch
 
 # ============================================================
 # GLOBALS / CONFIG
@@ -14,7 +15,7 @@ from utils.evaluation import CNNEvaluator
 TT = {}  # zobrist_key -> (depth, flag, score, best_move)
 
 INFINITY = 10_000_000
-MAX_DEPTH = 3  # bump to 4+ if it’s fast enough
+MAX_DEPTH = 4  # bump to 4+ if it’s fast enough
 
 # TT flags
 EXACT = 0
@@ -31,9 +32,12 @@ PIECE_VALUES = {
     chess.KING:   0,   # king material value irrelevant in eval
 }
 
+model_path = os.path.join(os.path.dirname(__file__), "utils", "chess_cnn_final.pth")
+cnn_eval = CNNEvaluator(model_path)
+# model_path = "src/utils/chess_cnn_final.pth"
 
-# load CNN
-cnn_eval = CNNEvaluator("chess_cnn_final.pth")
+cnn_eval = CNNEvaluator(model_path)
+
 
 def evaluate(board: chess.Board) -> float:
     """
@@ -41,6 +45,7 @@ def evaluate(board: chess.Board) -> float:
     Positive = good for side to move.
     """
     score = cnn_eval.evaluate_board(board)
+
     return score if board.turn == chess.WHITE else -score
 
 # ============================================================
@@ -316,3 +321,9 @@ def reset_func(ctx: GameContext):
     global TT
     TT = {}
     print("New game: transposition table cleared.")
+
+
+# if __name__ == "__main__":
+#     game = chess.Board()
+
+#     print(root_search(game, 2))
