@@ -19,7 +19,7 @@ EXACT = 0
 LOWERBOUND = 1
 UPPERBOUND = 2
 
-# Basic piece values (used in eval AND MVV-LVA)
+# Basic piece values (for eval)
 PIECE_VALUES = {
     chess.PAWN:   100,
     chess.KNIGHT: 320,
@@ -28,6 +28,39 @@ PIECE_VALUES = {
     chess.QUEEN:  900,
     chess.KING:   0,   # king material value irrelevant in eval
 }
+
+# ============================================================
+# MVV-LVA TABLE
+# ============================================================
+# Indexing: MVV_LVA_TABLE[victim_type][attacker_type]
+MVV_LVA_TABLE = [[0] * 7 for _ in range(7)]  # piece types 1..6
+
+MVV_VICTIM_VALUE = {
+    chess.PAWN:   1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK:   5,
+    chess.QUEEN:  9,
+    chess.KING:   10,  # arbitrary high; king captures are rare
+}
+
+MVV_ATTACKER_VALUE = {
+    chess.PAWN:   1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK:   5,
+    chess.QUEEN:  9,
+    chess.KING:   10,
+}
+
+for victim_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP,
+                    chess.ROOK, chess.QUEEN, chess.KING):
+    for attacker_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP,
+                          chess.ROOK, chess.QUEEN, chess.KING):
+        v = MVV_VICTIM_VALUE[victim_type]
+        a = MVV_ATTACKER_VALUE[attacker_type]
+        # Most valuable victim (large v), least valuable attacker (small a)
+        MVV_LVA_TABLE[victim_type][attacker_type] = v * 10 - a
 
 
 # ============================================================
@@ -115,23 +148,29 @@ def mvv_lva_score(board: chess.Board, move: Move) -> int:
     MVV-LVA: Most Valuable Victim - Least Valuable Attacker.
     Higher score = better (we sort descending).
     """
-    # Victim piece (handle en passant separately)
-    victim_piece = None
+
+    # Determine victim piece
     if board.is_en_passant(move):
-        victim_piece = chess.Piece(chess.PAWN, not board.turn)
+        # En passant always captures a pawn
+        victim_type = chess.PAWN
     else:
         victim_piece = board.piece_at(move.to_square)
+        if victim_piece is None:
+            return 0  # should not happen for a capture, but be safe
+        victim_type = victim_piece.piece_type
 
+    # Determine attacker piece type
     attacker_piece = board.piece_at(move.from_square)
-
-    if victim_piece is None or attacker_piece is None:
+    if attacker_piece is None:
         return 0
 
-    victim_value = PIECE_VALUES[victim_piece.piece_type]
-    attacker_value = PIECE_VALUES[attacker_piece.piece_type]
+    # Promotions: treat the attacker as the promotion piece, not just a pawn
+    if move.promotion is not None:
+        attacker_type = move.promotion
+    else:
+        attacker_type = attacker_piece.piece_type
 
-    # Victim high, attacker low is best
-    return victim_value * 10 - attacker_value
+    return MVV_LVA_TABLE[victim_type][attacker_type]
 
 
 def order_moves(board: chess.Board, moves, tt_move: Move | None):
@@ -161,12 +200,98 @@ def order_moves(board: chess.Board, moves, tt_move: Move | None):
 
 
 # ============================================================
-# SEARCH (NEGAMAX + ALPHA-BETA)
+# QUIESCENCE SEARCH
 # ============================================================
 
-def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
+def quiesce(board: chess.Board, alpha: int, beta: int) -> int:
     """
-    Negamax with alpha-beta pruning and TT.
+    Quiescence search:
+    - Only search "tactical" moves (captures).
+    - Use "stand pat" static eval as a lower bound.
+    - Avoid horizon effect by not stopping in the middle of a capture sequence.
+    """
+
+    # If the game is already over, handle like in normal search
+    if board.is_game_over():
+        if board.is_checkmate():
+            return -INFINITY + 1
+        return 0
+
+    # Stand pat: evaluate current (possibly non-quiet) position
+    stand_pat = evaluate(board)
+
+    # Fail-soft style
+    if stand_pat >= beta:
+        return stand_pat
+    if stand_pat > alpha:
+        alpha = stand_pat
+
+    # Generate capture moves only
+    captures = [m for m in board.legal_moves if board.is_capture(m)]
+    if not captures:
+        # No more captures: this is a "quiet enough" leaf
+        return stand_pat
+
+    # Order captures with MVV-LVA (we don't bother with TT move here)
+    captures = sorted(
+        captures,
+        key=lambda m: mvv_lva_score(board, m),
+        reverse=True
+    )
+
+    # Search all captures
+    for move in captures:
+        board.push(move)
+        score = -quiesce(board, -beta, -alpha)
+        board.pop()
+
+        if score >= beta:
+            return score
+        if score > alpha:
+            alpha = score
+
+    return alpha
+
+
+# ============================================================
+# NULL MOVE PRUNING HELPERS
+# ============================================================
+
+NULL_MOVE_REDUCTION = 2  # R (depth reduction), classic values are 2 or 3
+
+
+def has_non_pawn_material(board: chess.Board, color: bool) -> bool:
+    """Return True if the given side has any piece > pawn (N,B,R,Q)."""
+    for ptype in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
+        if board.pieces(ptype, color):
+            return True
+    return False
+
+
+def can_do_null_move(board: chess.Board) -> bool:
+    """
+    Basic conditions where we allow a null move:
+    - Not in check
+    - Side to move has some non-pawn material
+    (to reduce zugzwang blowups in pawn-only endgames)
+    """
+    if board.is_check():
+        return False
+
+    color = board.turn
+    if not has_non_pawn_material(board, color):
+        return False
+
+    return True
+
+
+# ============================================================
+# SEARCH (NEGAMAX + ALPHA-BETA + NULL MOVE)
+# ============================================================
+
+def negamax(board: chess.Board, depth: int, alpha: int, beta: int, allow_null: bool = True) -> int:
+    """
+    Negamax with alpha-beta pruning, TT, quiescence, and null move pruning.
     Returns a score from the perspective of the side to move.
     """
 
@@ -176,10 +301,30 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
             return -INFINITY + 1
         return 0
 
+    # Leaf: switch to quiescence search instead of plain evaluate()
     if depth == 0:
-        return evaluate(board)
+        return quiesce(board, alpha, beta)
 
     alpha_orig = alpha
+
+    # Try null move pruning (only if allowed and depth is large enough)
+    if allow_null and depth >= 3 and can_do_null_move(board):
+        # Make a null move (side passes the turn)
+        board.push(chess.Move.null())
+
+        null_depth = depth - 1 - NULL_MOVE_REDUCTION
+        if null_depth < 0:
+            null_depth = 0
+
+        # Reduced, zero-width search
+        score = -negamax(board, null_depth, -beta, -(beta - 1), allow_null=False)
+
+        board.pop()
+
+        if score >= beta:
+            # Null move search says "this position is already so good
+            # that even doing nothing fails high" => cut
+            return score
 
     # TT probe
     tt_hit, tt_score, tt_move = tt_probe(board, depth, alpha, beta)
@@ -199,7 +344,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
 
     for move in ordered_moves:
         board.push(move)
-        score = -negamax(board, depth - 1, -beta, -alpha)
+        score = -negamax(board, depth - 1, -beta, -alpha, allow_null=True)
         board.pop()
 
         if score > best_score:
@@ -249,7 +394,8 @@ def root_search(board: chess.Board, max_depth: int) -> Move | None:
 
         for move in ordered_moves:
             board.push(move)
-            score = -negamax(board, depth - 1, -beta, -alpha)
+            # Note: we pass `depth` directly, no -1 here.
+            score = -negamax(board, depth, -beta, -alpha, allow_null=True)
             board.pop()
 
             if current_best_move is None or score > current_best_score:
@@ -283,7 +429,7 @@ def test_func(ctx: GameContext):
 
     board = ctx.board
 
-    # Pure search: no book, just minimax+alpha-beta+MVV-LVA
+    # Search: minimax + alpha-beta + MVV-LVA + quiescence + null move pruning
     best_move = root_search(board, MAX_DEPTH)
 
     if best_move is None or best_move not in board.legal_moves:
@@ -293,9 +439,7 @@ def test_func(ctx: GameContext):
             raise ValueError("No legal moves available (checkmate or stalemate).")
         best_move = random.choice(legal_moves)
 
-    # Log a degenerate distribution: chosen move has probability 1
     ctx.logProbabilities({best_move: 1.0})
-
     return best_move
 
 
