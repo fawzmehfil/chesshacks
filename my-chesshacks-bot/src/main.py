@@ -1,9 +1,12 @@
-from .utils import chess_manager, GameContext
+from utils import chess_manager, GameContext
 from chess import Move
 import chess
 import chess.polyglot as polyglot
 import random
 import time
+
+from utils.evaluation import CNNEvaluator
+
 
 # ============================================================
 # GLOBALS / CONFIG
@@ -30,34 +33,40 @@ PIECE_VALUES = {
 }
 
 
+# load CNN
+cnn_eval = CNNEvaluator("chess_cnn_final.pth")
+
+def evaluate(board: chess.Board) -> float:
+    """
+    Uses CNN to evaluate the board.
+    Positive = good for side to move.
+    """
+    score = cnn_eval.evaluate_board(board)
+    return score if board.turn == chess.WHITE else -score
+
 # ============================================================
 # EVALUATION FUNCTION (placeholder for a "neural net")
 # ============================================================
+# def evaluate_basic(board: chess.Board) -> int:
+#     """
+#     placeholder eval function
+#     """
 
-def evaluate(board: chess.Board) -> int:
-    """
-    Simple evaluation function in centipawns.
-    Positive = good for side to move.
+#     # Material from White's perspective
+#     score = 0
+#     for ptype, value in PIECE_VALUES.items():
+#         score += len(board.pieces(ptype, chess.WHITE)) * value
+#         score -= len(board.pieces(ptype, chess.BLACK)) * value
 
-    This is currently a classic hand-crafted eval.
-    If you later train a neural net, this is where you'd call it.
-    """
+#     # Mobility
+#     mobility = board.legal_moves.count()
+#     if board.turn == chess.WHITE:
+#         score += 5 * mobility
+#     else:
+#         score -= 5 * mobility
 
-    # Material from White's perspective
-    score = 0
-    for ptype, value in PIECE_VALUES.items():
-        score += len(board.pieces(ptype, chess.WHITE)) * value
-        score -= len(board.pieces(ptype, chess.BLACK)) * value
-
-    # Mobility
-    mobility = board.legal_moves.count()
-    if board.turn == chess.WHITE:
-        score += 5 * mobility
-    else:
-        score -= 5 * mobility
-
-    # Convert to "side to move" perspective for negamax
-    return score if board.turn == chess.WHITE else -score
+#     # Convert to "side to move" perspective for negamax
+#     return score if board.turn == chess.WHITE else -score
 
 
 # ============================================================
